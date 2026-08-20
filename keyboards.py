@@ -31,13 +31,28 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def get_subscription_actions_keyboard(sub_id: int, is_active: bool) -> InlineKeyboardMarkup:
+def get_seller_type_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👥 Всі продавці (разом з бізнесом)")],
+            [KeyboardButton(text="👤 Тільки приватні особи")],
+            [KeyboardButton(text="❌ Скасувати")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_subscription_actions_keyboard(sub_id: int, is_active: bool, only_private: bool) -> InlineKeyboardMarkup:
     status_btn_text = "⏸ Пауза" if is_active else "▶️ Відновити"
+    private_btn_text = "👤 Тільки приватні: Так 🟢" if only_private else "👤 Тільки приватні: Ні ⚪"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="✏️ Змінити ціну", callback_data=f"editprice_{sub_id}"),
                 InlineKeyboardButton(text=status_btn_text, callback_data=f"toggle_{sub_id}")
+            ],
+            [
+                InlineKeyboardButton(text=private_btn_text, callback_data=f"togglepriv_{sub_id}")
             ],
             [
                 InlineKeyboardButton(text="🗑 Видалити", callback_data=f"delete_{sub_id}"),

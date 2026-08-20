@@ -41,7 +41,7 @@ async def start_health_server():
 
 async def monitor_olx_task(bot: Bot):
     """
-    Background task that periodically checks OLX for strictly fresh/newly created ads.
+    Background task that periodically checks OLX for strictly fresh ads and price drops.
     """
     logger.info(f"Starting OLX monitor background task (Interval: {config.CHECK_INTERVAL_SECONDS}s)...")
     await asyncio.sleep(5)
@@ -61,6 +61,7 @@ async def monitor_olx_task(bot: Bot):
                 query = sub["query"]
                 min_price = sub["min_price"]
                 max_price = sub["max_price"]
+                only_private = bool(sub.get("only_private", 0))
                 sub_created_at_str = sub.get("created_at")
 
                 sub_created_dt = None
@@ -74,18 +75,57 @@ async def monitor_olx_task(bot: Bot):
                     query=query,
                     min_price=min_price,
                     max_price=max_price,
+                    only_private=only_private,
                     limit=30
                 )
 
                 for offer in reversed(offers):
-                    seen = await db.is_offer_seen(sub_id, offer.id)
+                    seen, old_price = await db.get_seen_offer(sub_id, offer.id)
+
+                    # --- 1. PRICE DROP CHECK FOR EXISTING OFFERS ---
                     if seen:
+                        if old_price is not None and offer.price_val is not None and offer.price_val < old_price:
+                            discount = old_price - offer.price_val
+                            pct = (discount / old_price) * 100
+                            caption = (
+                                f"📉 <b>ЗНИЖЕННЯ ЦІНИ! (-{discount:g} грн / -{pct:.0f}%)</b>\n"
+                                f"🔍 Пошук: <i>{query}</i>\n\n"
+                                f"🏷 <b>{offer.title}</b>\n"
+                                f"💰 Було: <s>{old_price:g} грн</s> ➡️ <b>{offer.price_str}</b>\n"
+                                f"📍 <b>Локація:</b> {offer.location}\n"
+                            )
+                            keyboard = get_offer_link_keyboard(offer.url)
+
+                            try:
+                                if offer.photo_url:
+                                    await bot.send_photo(
+                                        chat_id=user_id,
+                                        photo=offer.photo_url,
+                                        caption=caption,
+                                        reply_markup=keyboard,
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                else:
+                                    await bot.send_message(
+                                        chat_id=user_id,
+                                        text=caption,
+                                        reply_markup=keyboard,
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                logger.info(f"Price drop sent for offer {offer.id} ({old_price} -> {offer.price_val})")
+                                await asyncio.sleep(0.5)
+                            except Exception as send_err:
+                                logger.error(f"Failed to send price drop alert to {user_id}: {send_err}")
+
+                            # Update the stored price
+                            await db.mark_offer_seen(sub_id, offer.id, offer.price_val)
                         continue
 
-                    # Mark as seen
-                    await db.mark_offer_seen(sub_id, offer.id)
+                    # --- 2. NEW FRESH OFFER CHECK ---
+                    # Always store as seen
+                    await db.mark_offer_seen(sub_id, offer.id, offer.price_val)
 
-                    # Freshness filter: must be after subscription created
+                    # If created before subscription started, ignore
                     if sub_created_dt and offer.created_dt and offer.created_dt < sub_created_dt:
                         continue
 
@@ -93,21 +133,20 @@ async def monitor_olx_task(bot: Bot):
                     if offer.created_dt:
                         age_minutes = (now_utc - offer.created_dt).total_seconds() / 60
                         if age_minutes > 60:
-                            logger.info(f"Skipping old pushed offer {offer.id} (age: {age_minutes:.1f}m)")
                             continue
                         
-                        if age_minutes <= 2:
-                            time_label = "щойно"
-                        else:
-                            time_label = f"{int(age_minutes)} хв тому"
+                        time_label = "щойно" if age_minutes <= 2 else f"{int(age_minutes)} хв тому"
                     else:
                         time_label = "щойно"
+
+                    seller_tag = "👤 Приватна особа" if not offer.is_business else "🏢 Бізнес / Магазин"
 
                     caption = (
                         f"🆕 <b>Щойно опубліковано!</b> ({time_label})\n"
                         f"🔍 Пошук: <i>{query}</i>\n\n"
                         f"🏷 <b>{offer.title}</b>\n"
                         f"💰 <b>Ціна:</b> {offer.price_str}\n"
+                        f"👤 <b>Продавець:</b> {seller_tag}\n"
                         f"📍 <b>Локація:</b> {offer.location}\n"
                     )
 
@@ -149,7 +188,6 @@ async def main():
     await db.init_db()
     logger.info("Database initialized successfully.")
 
-    # Start healthcheck server for Render
     web_runner = await start_health_server()
 
     bot = Bot(

@@ -92,6 +92,7 @@ class OlxOffer:
     photo_url: Optional[str]
     created_time: str
     created_dt: Optional[datetime]
+    is_business: bool = False
 
 async def _fetch_single_query(
     session: aiohttp.ClientSession,
@@ -128,6 +129,7 @@ async def _fetch_single_query(
                     title = item.get("title", "Без назви")
                     item_url = item.get("url", "")
                     created_time_str = item.get("created_time", "")
+                    is_business = bool(item.get("business", False))
                     
                     created_dt = None
                     if created_time_str:
@@ -143,7 +145,12 @@ async def _fetch_single_query(
                         if p.get("key") == "price":
                             val_data = p.get("value", {})
                             price_str = val_data.get("label", price_str)
-                            price_val = val_data.get("value")
+                            raw_val = val_data.get("value")
+                            if raw_val is not None:
+                                try:
+                                    price_val = float(raw_val)
+                                except Exception:
+                                    pass
                             break
 
                     # Location parsing
@@ -169,7 +176,8 @@ async def _fetch_single_query(
                         location=location_str,
                         photo_url=photo_url,
                         created_time=created_time_str,
-                        created_dt=created_dt
+                        created_dt=created_dt,
+                        is_business=is_business
                     ))
                 except Exception as parse_err:
                     logger.error(f"Error parsing offer item: {parse_err}")
@@ -185,6 +193,7 @@ async def fetch_olx_offers(
     query: str,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
+    only_private: bool = False,
     limit: int = 40
 ) -> List[OlxOffer]:
     variants = generate_query_variants(query)
@@ -217,9 +226,11 @@ async def fetch_olx_offers(
                 for offer in res:
                     if offer.id not in seen_ids:
                         seen_ids.add(offer.id)
+                        # Filter by private person if requested
+                        if only_private and offer.is_business:
+                            continue
                         if is_title_match(query, offer.title):
                             all_offers.append(offer)
 
-    # Sort so that newest created_time is first
     all_offers.sort(key=lambda x: x.created_time, reverse=True)
     return all_offers

@@ -9,6 +9,7 @@ from keyboards import (
     get_main_keyboard,
     get_skip_cancel_keyboard,
     get_cancel_keyboard,
+    get_seller_type_keyboard,
     get_subscription_actions_keyboard,
 )
 import database as db
@@ -21,6 +22,7 @@ class AddSubscription(StatesGroup):
     waiting_for_query = State()
     waiting_for_min_price = State()
     waiting_for_max_price = State()
+    waiting_for_seller_type = State()
 
 class EditPrice(StatesGroup):
     waiting_for_min_price = State()
@@ -32,10 +34,11 @@ async def cmd_start(message: Message, state: FSMContext):
     welcome_text = (
         f"👋 <b>Привіт, {message.from_user.first_name}!</b>\n\n"
         "Я бот для моніторингу найсвіжіших оголошень на <b>OLX Україна</b>.\n\n"
-        "⚡ <b>Особливості:</b>\n"
-        "• Надсилає <b>тільки щойно викладені</b> оголошення.\n"
-        "• Автоматично розуміє синоніми (<i>iPhone 14 / айфон 14</i>).\n"
-        "• Гнучке налаштування цін для кожної підписки.\n\n"
+        "⚡ <b>Можливості:</b>\n"
+        "• 🆕 Тільки нові публікації (без старих піднятих оголошень).\n"
+        "• 📉 <b>Відстеження зниження ціни</b> (повідомлю, якщо продавець зробить знижку!).\n"
+        "• 👤 <b>Фільтр за продавцем</b> (можна приховати магазини і дивитися тільки приватні).\n"
+        "• 🧠 Розумні синоніми (<i>iPhone 14 / айфон 14</i>).\n\n"
         "Оберіть дію в меню нижче 👇"
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
@@ -45,10 +48,10 @@ async def cmd_start(message: Message, state: FSMContext):
 async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
     help_text = (
-        "📖 <b>Інструкція з використання:</b>\n\n"
-        "• <b>🔍 Додати новий пошук</b> — створення нової підписки на товар із фільтром цін.\n"
-        "• <b>📋 Мої підписки</b> — перегляд, зміна ціни, зупинка або видалення ваших пошуків.\n\n"
-        "⚡ <i>Бот моніторить OLX і надсилає повідомлення в момент публікації нового товару!</i>"
+        "📖 <b>Інструкція:</b>\n\n"
+        "• <b>🔍 Додати новий пошук</b> — створення нової підписки з фільтром цін та типом продавця.\n"
+        "• <b>📋 Мої підписки</b> — керування підписками (зміна ціни, фільтр тільки приватні, пауза, видалення).\n\n"
+        "🔥 <i>Бот автоматично сповістить вас про нові товари та про будь-яке зниження ціни!</i>"
     )
     await message.answer(help_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
@@ -124,18 +127,35 @@ async def process_max_price(message: Message, state: FSMContext):
             return
 
     data = await state.get_data()
-    query = data["query"]
     min_price = data.get("min_price")
 
     if min_price is not None and max_price is not None and min_price > max_price:
         await message.answer("⚠️ Мінімальна ціна не може бути більшою за максимальну. Спробуйте ще раз ввести максимальну ціну:")
         return
 
+    await state.update_data(max_price=max_price)
+    await state.set_state(AddSubscription.waiting_for_seller_type)
+    await message.answer(
+        "👤 Оберіть тип продавця:",
+        reply_markup=get_seller_type_keyboard()
+    )
+
+@router.message(AddSubscription.waiting_for_seller_type)
+async def process_seller_type(message: Message, state: FSMContext):
+    text = message.text.strip()
+    only_private = 1 if "Тільки приватні" in text else 0
+
+    data = await state.get_data()
+    query = data["query"]
+    min_price = data.get("min_price")
+    max_price = data.get("max_price")
+
     sub_id = await db.add_subscription(
         user_id=message.from_user.id,
         query=query,
         min_price=min_price,
-        max_price=max_price
+        max_price=max_price,
+        only_private=only_private
     )
     await state.clear()
 
@@ -147,24 +167,34 @@ async def process_max_price(message: Message, state: FSMContext):
     elif max_price:
         price_info = f"до {max_price:g} грн"
 
+    seller_info = "👤 Тільки приватні особи" if only_private else "👥 Всі продавці (разом з магазинами)"
+
     msg = (
         f"✅ <b>Підписку успішно додано!</b>\n\n"
         f"🔍 <b>Запит:</b> {query}\n"
-        f"💰 <b>Ціна:</b> {price_info}\n\n"
-        f"⏳ <i>Фіксуємо поточні оголошення...</i>"
+        f"💰 <b>Ціна:</b> {price_info}\n"
+        f"🏷 <b>Продавці:</b> {seller_info}\n\n"
+        f"⏳ <i>Фіксуємо поточні оголошення та ціни...</i>"
     )
     status_msg = await message.answer(msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-    existing_offers = await olx_parser.fetch_olx_offers(query=query, min_price=min_price, max_price=max_price, limit=50)
+    existing_offers = await olx_parser.fetch_olx_offers(
+        query=query,
+        min_price=min_price,
+        max_price=max_price,
+        only_private=bool(only_private),
+        limit=50
+    )
     if existing_offers:
-        offer_ids = [o.id for o in existing_offers]
-        await db.mark_offers_seen_batch(sub_id, offer_ids)
+        offers_data = [(o.id, o.price_val) for o in existing_offers]
+        await db.mark_offers_seen_batch(sub_id, offers_data)
 
     await status_msg.edit_text(
         f"✅ <b>Підписку активовано!</b>\n\n"
         f"🔍 <b>Запит:</b> {query}\n"
-        f"💰 <b>Ціна:</b> {price_info}\n\n"
-        f"✨ Бот надсилатиме <b>виключно свіжі оголошення</b>! 🚀",
+        f"💰 <b>Ціна:</b> {price_info}\n"
+        f"🏷 <b>Продавці:</b> {seller_info}\n\n"
+        f"✨ Бот сповіщатиме про <b>нові публікації</b> та <b>зниження цін</b>! 🚀",
         parse_mode="HTML"
     )
 
@@ -231,10 +261,9 @@ async def process_edit_max_price(message: Message, state: FSMContext):
     min_price = data.get("min_price")
 
     if min_price is not None and max_price is not None and min_price > max_price:
-        await message.answer("⚠️ Мінімальна ціна не може бути більшою за максимальну. Спробуйте ще раз ввести максимальну ціну:")
+        await message.answer("⚠️ Мінімальна ціна не може бути більшою за максимальну. Спробуйте ще раз:")
         return
 
-    # Оновлення ціни в базі
     await db.update_subscription_price(sub_id, message.from_user.id, min_price, max_price)
     await state.clear()
 
@@ -256,6 +285,25 @@ async def process_edit_max_price(message: Message, state: FSMContext):
 
 # --- Список підписок ---
 
+def format_sub_card(sub: dict) -> str:
+    status_icon = "🟢 Активна" if sub["is_active"] else "⏸ На паузі"
+    seller_icon = "👤 Тільки приватні" if sub.get("only_private") else "👥 Всі продавці"
+    price_info = "Будь-яка"
+    if sub["min_price"] and sub["max_price"]:
+        price_info = f"{sub['min_price']:g} - {sub['max_price']:g} грн"
+    elif sub["min_price"]:
+        price_info = f"від {sub['min_price']:g} грн"
+    elif sub["max_price"]:
+        price_info = f"до {sub['max_price']:g} грн"
+
+    return (
+        f"📌 <b>{sub['query']}</b>\n"
+        f"💰 Ціна: {price_info}\n"
+        f"🏷 Продавці: {seller_icon}\n"
+        f"Статус: {status_icon}\n"
+        f"Створено: {sub['created_at'][:16].replace('T', ' ')}"
+    )
+
 @router.message(F.text == "📋 Мої підписки")
 @router.message(Command("list"))
 async def list_subscriptions(message: Message, state: FSMContext):
@@ -273,24 +321,14 @@ async def list_subscriptions(message: Message, state: FSMContext):
     await message.answer(f"📋 <b>Ваші підписки ({len(subs)}):</b>", parse_mode="HTML")
 
     for sub in subs:
-        status_icon = "🟢 Активна" if sub["is_active"] else "⏸ На паузі"
-        price_info = "Будь-яка"
-        if sub["min_price"] and sub["max_price"]:
-            price_info = f"{sub['min_price']:g} - {sub['max_price']:g} грн"
-        elif sub["min_price"]:
-            price_info = f"від {sub['min_price']:g} грн"
-        elif sub["max_price"]:
-            price_info = f"до {sub['max_price']:g} грн"
-
-        text = (
-            f"📌 <b>{sub['query']}</b>\n"
-            f"💰 Ціна: {price_info}\n"
-            f"Статус: {status_icon}\n"
-            f"Створено: {sub['created_at'][:16].replace('T', ' ')}"
-        )
+        text = format_sub_card(sub)
         await message.answer(
             text,
-            reply_markup=get_subscription_actions_keyboard(sub["id"], bool(sub["is_active"])),
+            reply_markup=get_subscription_actions_keyboard(
+                sub["id"],
+                bool(sub["is_active"]),
+                bool(sub.get("only_private", 0))
+            ),
             parse_mode="HTML"
         )
 
@@ -305,23 +343,38 @@ async def callback_toggle_sub(call: CallbackQuery):
         return
 
     sub = await db.get_subscription_by_id(sub_id, call.from_user.id)
-    status_icon = "🟢 Активна" if new_status else "⏸ На паузі"
-    price_info = "Будь-яка"
-    if sub["min_price"] and sub["max_price"]:
-        price_info = f"{sub['min_price']:g} - {sub['max_price']:g} грн"
-    elif sub["min_price"]:
-        price_info = f"від {sub['min_price']:g} грн"
-    elif sub["max_price"]:
-        price_info = f"до {sub['max_price']:g} грн"
-
-    text = (
-        f"📌 <b>{sub['query']}</b>\n"
-        f"💰 Ціна: {price_info}\n"
-        f"Статус: {status_icon}\n"
-        f"Створено: {sub['created_at'][:16].replace('T', ' ')}"
+    text = format_sub_card(sub)
+    await call.message.edit_text(
+        text,
+        reply_markup=get_subscription_actions_keyboard(
+            sub_id,
+            bool(new_status),
+            bool(sub.get("only_private", 0))
+        ),
+        parse_mode="HTML"
     )
-    await call.message.edit_text(text, reply_markup=get_subscription_actions_keyboard(sub_id, bool(new_status)), parse_mode="HTML")
     await call.answer("Статус оновлено!")
+
+@router.callback_query(F.data.startswith("togglepriv_"))
+async def callback_toggle_private(call: CallbackQuery):
+    sub_id = int(call.data.split("_")[1])
+    new_priv = await db.toggle_private_filter(sub_id, call.from_user.id)
+    if new_priv is None:
+        await call.answer("⚠️ Підписку не знайдено", show_alert=True)
+        return
+
+    sub = await db.get_subscription_by_id(sub_id, call.from_user.id)
+    text = format_sub_card(sub)
+    await call.message.edit_text(
+        text,
+        reply_markup=get_subscription_actions_keyboard(
+            sub_id,
+            bool(sub["is_active"]),
+            bool(new_priv)
+        ),
+        parse_mode="HTML"
+    )
+    await call.answer("Фільтр продавців змінено!")
 
 @router.callback_query(F.data.startswith("delete_"))
 async def callback_delete_sub(call: CallbackQuery):
@@ -331,7 +384,7 @@ async def callback_delete_sub(call: CallbackQuery):
         await call.message.edit_text("🗑 <b>Підписку видалено.</b>", parse_mode="HTML")
         await call.answer("Видалено!")
     else:
-        await call.answer("Помилка видалення або вже видалено.", show_alert=True)
+        await call.answer("Помилка видалення.", show_alert=True)
 
 @router.callback_query(F.data == "back_to_list")
 async def callback_back_to_list(call: CallbackQuery, state: FSMContext):
