@@ -28,15 +28,16 @@ async def handle_healthcheck(request):
 
 async def start_health_server():
     """Lightweight HTTP server for Render Web Service health checks."""
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "10000"))
     app = web.Application()
-    app.router.add_get("/", handle_healthcheck)
-    app.router.add_get("/health", handle_healthcheck)
+    # Support ALL HTTP methods (GET, HEAD, POST, etc.) on root and /health
+    app.router.add_route("*", "/", handle_healthcheck)
+    app.router.add_route("*", "/health", handle_healthcheck)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Healthcheck server listening on port {port}")
+    logger.info(f"Healthcheck server listening on 0.0.0.0:{port}")
     return runner
 
 async def monitor_olx_task(bot: Bot):
@@ -122,7 +123,6 @@ async def monitor_olx_task(bot: Bot):
                         continue
 
                     # --- 2. NEW FRESH OFFER CHECK ---
-                    # Always store as seen
                     await db.mark_offer_seen(sub_id, offer.id, offer.price_val)
 
                     # If created before subscription started, ignore
