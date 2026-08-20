@@ -48,11 +48,12 @@ def get_subscription_actions_keyboard(sub_id: int, is_active: bool, only_private
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✏️ Змінити ціну", callback_data=f"editprice_{sub_id}"),
-                InlineKeyboardButton(text=status_btn_text, callback_data=f"toggle_{sub_id}")
+                InlineKeyboardButton(text="📊 Аналітика ринку", callback_data=f"analytics_{sub_id}"),
+                InlineKeyboardButton(text="✏️ Змінити ціну", callback_data=f"editprice_{sub_id}")
             ],
             [
-                InlineKeyboardButton(text=private_btn_text, callback_data=f"togglepriv_{sub_id}")
+                InlineKeyboardButton(text=private_btn_text, callback_data=f"togglepriv_{sub_id}"),
+                InlineKeyboardButton(text=status_btn_text, callback_data=f"toggle_{sub_id}")
             ],
             [
                 InlineKeyboardButton(text="🗑 Видалити", callback_data=f"delete_{sub_id}"),

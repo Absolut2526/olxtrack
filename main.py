@@ -30,7 +30,6 @@ async def start_health_server():
     """Lightweight HTTP server for Render Web Service health checks."""
     port = int(os.getenv("PORT", "10000"))
     app = web.Application()
-    # Support ALL HTTP methods (GET, HEAD, POST, etc.) on root and /health
     app.router.add_route("*", "/", handle_healthcheck)
     app.router.add_route("*", "/health", handle_healthcheck)
     runner = web.AppRunner(app)
@@ -40,9 +39,25 @@ async def start_health_server():
     logger.info(f"Healthcheck server listening on 0.0.0.0:{port}")
     return runner
 
+# Cache market stats per query to avoid spamming the API
+market_stats_cache = {}
+
+async def get_cached_market_stats(query: str, min_p, max_p):
+    key = f"{query}_{min_p}_{max_p}"
+    now = datetime.now()
+    if key in market_stats_cache:
+        stats, timestamp = market_stats_cache[key]
+        if (now - timestamp).total_seconds() < 3600: # 1 hour cache
+            return stats
+    
+    stats = await olx_parser.calculate_market_stats(query, min_p, max_p)
+    if stats:
+        market_stats_cache[key] = (stats, now)
+    return stats
+
 async def monitor_olx_task(bot: Bot):
     """
-    Background task that periodically checks OLX for strictly fresh ads and price drops.
+    Background task that periodically checks OLX for strictly fresh ads, price drops, and hot deals.
     """
     logger.info(f"Starting OLX monitor background task (Interval: {config.CHECK_INTERVAL_SECONDS}s)...")
     await asyncio.sleep(5)
@@ -79,6 +94,9 @@ async def monitor_olx_task(bot: Bot):
                     only_private=only_private,
                     limit=30
                 )
+
+                # Get market stats for query
+                stats = await get_cached_market_stats(query, min_price, max_price)
 
                 for offer in reversed(offers):
                     seen, old_price = await db.get_seen_offer(sub_id, offer.id)
@@ -118,18 +136,15 @@ async def monitor_olx_task(bot: Bot):
                             except Exception as send_err:
                                 logger.error(f"Failed to send price drop alert to {user_id}: {send_err}")
 
-                            # Update the stored price
                             await db.mark_offer_seen(sub_id, offer.id, offer.price_val)
                         continue
 
                     # --- 2. NEW FRESH OFFER CHECK ---
                     await db.mark_offer_seen(sub_id, offer.id, offer.price_val)
 
-                    # If created before subscription started, ignore
                     if sub_created_dt and offer.created_dt and offer.created_dt < sub_created_dt:
                         continue
 
-                    # Filter out old pushed ads (> 60 mins)
                     if offer.created_dt:
                         age_minutes = (now_utc - offer.created_dt).total_seconds() / 60
                         if age_minutes > 60:
@@ -139,13 +154,23 @@ async def monitor_olx_task(bot: Bot):
                     else:
                         time_label = "щойно"
 
+                    # Hot deal badge check
+                    hot_deal_header = f"🆕 <b>Щойно опубліковано!</b> ({time_label})"
+                    price_line = f"💰 <b>Ціна:</b> {offer.price_str}"
+
+                    if stats and stats.median_price and offer.price_val and offer.price_val > 0:
+                        diff_pct = (stats.median_price - offer.price_val) / stats.median_price * 100
+                        if diff_pct >= 20: # 20% or more below market
+                            hot_deal_header = f"🔥 <b>ГАРЯЧА ПРОПОЗИЦІЯ! (-{diff_pct:.0f}% від ринку!)</b> ({time_label})"
+                            price_line = f"💰 <b>Ціна:</b> {offer.price_str} <i>(Сер. на OLX: ~{int(stats.median_price):,} грн)</i>"
+
                     seller_tag = "👤 Приватна особа" if not offer.is_business else "🏢 Бізнес / Магазин"
 
                     caption = (
-                        f"🆕 <b>Щойно опубліковано!</b> ({time_label})\n"
+                        f"{hot_deal_header}\n"
                         f"🔍 Пошук: <i>{query}</i>\n\n"
                         f"🏷 <b>{offer.title}</b>\n"
-                        f"💰 <b>Ціна:</b> {offer.price_str}\n"
+                        f"{price_line}\n"
                         f"👤 <b>Продавець:</b> {seller_tag}\n"
                         f"📍 <b>Локація:</b> {offer.location}\n"
                     )

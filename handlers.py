@@ -35,10 +35,11 @@ async def cmd_start(message: Message, state: FSMContext):
         f"👋 <b>Привіт, {message.from_user.first_name}!</b>\n\n"
         "Я бот для моніторингу найсвіжіших оголошень на <b>OLX Україна</b>.\n\n"
         "⚡ <b>Можливості:</b>\n"
-        "• 🆕 Тільки нові публікації (без старих піднятих оголошень).\n"
-        "• 📉 <b>Відстеження зниження ціни</b> (повідомлю, якщо продавець зробить знижку!).\n"
-        "• 👤 <b>Фільтр за продавцем</b> (можна приховати магазини і дивитися тільки приватні).\n"
-        "• 🧠 Розумні синоніми (<i>iPhone 14 / айфон 14</i>).\n\n"
+        "• 🆕 Тільки нові публікації (без спаму та старих піднятих оголошень).\n"
+        "• 🔥 <b>Розумна оцінка цін</b> (знаходжу гарячі пропозиції нижче ринку!).\n"
+        "• 📊 <b>Аналітика ринку</b> (середня, мінімальна та медіанна ціна товару).\n"
+        "• 📉 <b>Відстеження зниження ціни</b> від продавців.\n"
+        "• 👤 <b>Фільтр продавців</b> (тільки приватні або всі).\n\n"
         "Оберіть дію в меню нижче 👇"
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
@@ -49,9 +50,9 @@ async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
     help_text = (
         "📖 <b>Інструкція:</b>\n\n"
-        "• <b>🔍 Додати новий пошук</b> — створення нової підписки з фільтром цін та типом продавця.\n"
-        "• <b>📋 Мої підписки</b> — керування підписками (зміна ціни, фільтр тільки приватні, пауза, видалення).\n\n"
-        "🔥 <i>Бот автоматично сповістить вас про нові товари та про будь-яке зниження ціни!</i>"
+        "• <b>🔍 Додати новий пошук</b> — створення нової підписки з фільтрами цін та продавців.\n"
+        "• <b>📋 Мої підписки</b> — перегляд списку, аналітика ринку 📊, зміна ціни ✏️, пауза та видалення.\n\n"
+        "🔥 <i>Бот автоматично сповістить про нові товари та покаже плашку «🔥 ГАРЯЧА ЦІНА», якщо товар суттєво дешевший за ринок!</i>"
     )
     await message.answer(help_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
@@ -167,14 +168,14 @@ async def process_seller_type(message: Message, state: FSMContext):
     elif max_price:
         price_info = f"до {max_price:g} грн"
 
-    seller_info = "👤 Тільки приватні особи" if only_private else "👥 Всі продавці (разом з магазинами)"
+    seller_info = "👤 Тільки приватні особи" if only_private else "👥 Всі продавці"
 
     msg = (
         f"✅ <b>Підписку успішно додано!</b>\n\n"
         f"🔍 <b>Запит:</b> {query}\n"
         f"💰 <b>Ціна:</b> {price_info}\n"
         f"🏷 <b>Продавці:</b> {seller_info}\n\n"
-        f"⏳ <i>Фіксуємо поточні оголошення та ціни...</i>"
+        f"⏳ <i>Аналізуємо ринок та фіксуємо оголошення...</i>"
     )
     status_msg = await message.answer(msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
@@ -189,12 +190,18 @@ async def process_seller_type(message: Message, state: FSMContext):
         offers_data = [(o.id, o.price_val) for o in existing_offers]
         await db.mark_offers_seen_batch(sub_id, offers_data)
 
+    stats = await olx_parser.calculate_market_stats(query, min_price=min_price, max_price=max_price)
+    stats_text = ""
+    if stats:
+        stats_text = f"\n\n📊 <b>Середня ціна на ринку:</b> ~{int(stats.median_price):,} грн"
+
     await status_msg.edit_text(
         f"✅ <b>Підписку активовано!</b>\n\n"
         f"🔍 <b>Запит:</b> {query}\n"
         f"💰 <b>Ціна:</b> {price_info}\n"
-        f"🏷 <b>Продавці:</b> {seller_info}\n\n"
-        f"✨ Бот сповіщатиме про <b>нові публікації</b> та <b>зниження цін</b>! 🚀",
+        f"🏷 <b>Продавці:</b> {seller_info}"
+        f"{stats_text}\n\n"
+        f"✨ Бот надсилатиме <b>виключно свіжі оголошення</b> та виділятиме <b>гарячі пропозиції</b>! 🚀",
         parse_mode="HTML"
     )
 
@@ -282,6 +289,44 @@ async def process_edit_max_price(message: Message, state: FSMContext):
         reply_markup=get_main_keyboard(),
         parse_mode="HTML"
     )
+
+# --- Аналітика ринку ---
+
+@router.callback_query(F.data.startswith("analytics_"))
+async def callback_show_analytics(call: CallbackQuery):
+    sub_id = int(call.data.split("_")[1])
+    sub = await db.get_subscription_by_id(sub_id, call.from_user.id)
+    if not sub:
+        await call.answer("⚠️ Підписку не знайдено", show_alert=True)
+        return
+
+    await call.answer("📊 Збираємо ринкові дані...")
+    
+    stats = await olx_parser.calculate_market_stats(
+        query=sub["query"],
+        min_price=sub["min_price"],
+        max_price=sub["max_price"]
+    )
+
+    if not stats:
+        await call.message.answer(
+            f"📊 <b>Аналітика для «{sub['query']}»:</b>\n\n"
+            "Недостатньо активних оголошень для формування точної статистики цін.",
+            parse_mode="HTML"
+        )
+        return
+
+    hot_deal_threshold = int(stats.median_price * 0.8)
+
+    text = (
+        f"📊 <b>Ринкова аналітика для «{sub['query']}»:</b>\n\n"
+        f"📦 <b>Проаналізовано оголошень:</b> {stats.count} шт.\n"
+        f"🎯 <b>Медіанна / Середня ціна:</b> ~{int(stats.median_price):,} грн\n"
+        f"📉 <b>Найдешевше на ринку:</b> {int(stats.min_price):,} грн\n"
+        f"📈 <b>Найдорожче на ринку:</b> {int(stats.max_price):,} грн\n\n"
+        f"🔥 <b>Поріг вигідної угоди:</b> нижче <b>{hot_deal_threshold:,} грн</b> (від -20% від ринку)"
+    )
+    await call.message.answer(text, parse_mode="HTML")
 
 # --- Список підписок ---
 

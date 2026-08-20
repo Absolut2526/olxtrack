@@ -3,6 +3,7 @@ import aiohttp
 import ssl
 import logging
 import re
+import statistics
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional, List, Set, Dict
@@ -93,6 +94,14 @@ class OlxOffer:
     created_time: str
     created_dt: Optional[datetime]
     is_business: bool = False
+
+@dataclass
+class MarketStats:
+    count: int
+    avg_price: float
+    median_price: float
+    min_price: float
+    max_price: float
 
 async def _fetch_single_query(
     session: aiohttp.ClientSession,
@@ -226,7 +235,6 @@ async def fetch_olx_offers(
                 for offer in res:
                     if offer.id not in seen_ids:
                         seen_ids.add(offer.id)
-                        # Filter by private person if requested
                         if only_private and offer.is_business:
                             continue
                         if is_title_match(query, offer.title):
@@ -234,3 +242,35 @@ async def fetch_olx_offers(
 
     all_offers.sort(key=lambda x: x.created_time, reverse=True)
     return all_offers
+
+async def calculate_market_stats(
+    query: str,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None
+) -> Optional[MarketStats]:
+    """Calculates market average and median prices for a query."""
+    offers = await fetch_olx_offers(query, min_price=min_price, max_price=max_price, limit=50)
+    prices = [o.price_val for o in offers if o.price_val and o.price_val > 0]
+    
+    if len(prices) < 3:
+        return None
+
+    prices.sort()
+    
+    # Trim extreme 10% outliers for robust average calculation
+    if len(prices) >= 10:
+        trim_count = max(1, int(len(prices) * 0.10))
+        trimmed_prices = prices[trim_count:-trim_count]
+    else:
+        trimmed_prices = prices
+
+    avg = statistics.mean(trimmed_prices)
+    med = statistics.median(prices)
+    
+    return MarketStats(
+        count=len(prices),
+        avg_price=round(avg, 2),
+        median_price=round(med, 2),
+        min_price=min(prices),
+        max_price=max(prices)
+    )
